@@ -1,0 +1,11 @@
+.venv/
+.vscode/
+.archive/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+outputs/
+_notebook_image_probe/
+presentation_notebook_images/
+*.log
+deliverable/
