@@ -9,3 +9,5 @@ _notebook_image_probe/
 presentation_notebook_images/
 *.log
 deliverable/
+build_data_pipeline_dashboard.py
+healthcare_data_pipeline_dashboard.html

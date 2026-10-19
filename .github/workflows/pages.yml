@@ -1,4 +1,4 @@
-name: Deploy stroke prediction dashboard to Pages
+name: Deploy care risk outreach dashboard to Pages
 
 on:
   push:
