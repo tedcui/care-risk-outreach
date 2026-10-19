@@ -23,6 +23,8 @@ ROOT = Path(__file__).resolve().parent
 DATA_PATH = ROOT / "src_stroke_prediction.csv"
 OUT_DIR = ROOT / "outputs" / "dashboard_v3"
 HTML_PATH = ROOT / "stroke_prediction_dashboard_v3.html"
+PAGES_DIR = ROOT / "docs"
+PAGES_PATH = PAGES_DIR / "index.html"
 JSON_PATH = OUT_DIR / "dashboard_data_v3.json"
 RANDOM_STATE = 42
 
@@ -470,6 +472,7 @@ renderAll();
 
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    PAGES_DIR.mkdir(parents=True, exist_ok=True)
     data = build_data()
     JSON_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
     html = (
@@ -478,8 +481,10 @@ def main() -> None:
         .replace("__DEFAULT_CAPACITY__", str(data["summary"]["default_capacity"]))
     )
     HTML_PATH.write_text(html, encoding="utf-8")
+    PAGES_PATH.write_text(html, encoding="utf-8")
     print(f"Wrote {JSON_PATH}")
     print(f"Wrote {HTML_PATH}")
+    print(f"Wrote {PAGES_PATH}")
 
 
 if __name__ == "__main__":

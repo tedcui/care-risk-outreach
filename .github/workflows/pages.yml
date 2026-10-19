@@ -1,4 +1,4 @@
-name: Deploy data pipeline dashboard to Pages
+name: Deploy stroke prediction dashboard to Pages
 
 on:
   push:
