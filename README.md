@@ -36,6 +36,8 @@ Build the separate data-pipeline dashboard with:
 python build_data_pipeline_dashboard.py
 ```
 
+The builder also writes `docs/index.html`, which is the GitHub Pages artifact. The workflow in `.github/workflows/pages.yml` publishes only the `docs/` directory after changes reach `main`.
+
 ## Notes
 
 - Patient identifiers are excluded from the dashboard data.

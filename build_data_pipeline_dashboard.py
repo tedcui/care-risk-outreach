@@ -3,6 +3,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 HTML_PATH = ROOT / "healthcare_data_pipeline_dashboard.html"
+PAGES_DIR = ROOT / "docs"
+PAGES_PATH = PAGES_DIR / "index.html"
 
 
 HTML = r"""<!doctype html>
@@ -96,8 +98,11 @@ document.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{state.tab=b.da
 
 
 def main() -> None:
+    PAGES_DIR.mkdir(parents=True, exist_ok=True)
     HTML_PATH.write_text(HTML, encoding="utf-8")
+    PAGES_PATH.write_text(HTML, encoding="utf-8")
     print(f"Wrote {HTML_PATH}")
+    print(f"Wrote {PAGES_PATH}")
 
 
 if __name__ == "__main__":
