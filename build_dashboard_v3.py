@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent
 DATA_PATH = ROOT / "src_stroke_prediction.csv"
 OUT_DIR = ROOT / "outputs" / "dashboard_v3"
 HTML_PATH = ROOT / "stroke_prediction_dashboard_v3.html"
+INDEX_PATH = ROOT / "index.html"
 PAGES_DIR = ROOT / "docs"
 PAGES_PATH = PAGES_DIR / "index.html"
 JSON_PATH = OUT_DIR / "dashboard_data_v3.json"
@@ -481,9 +482,11 @@ def main() -> None:
         .replace("__DEFAULT_CAPACITY__", str(data["summary"]["default_capacity"]))
     )
     HTML_PATH.write_text(html, encoding="utf-8")
+    INDEX_PATH.write_text(html, encoding="utf-8")
     PAGES_PATH.write_text(html, encoding="utf-8")
     print(f"Wrote {JSON_PATH}")
     print(f"Wrote {HTML_PATH}")
+    print(f"Wrote {INDEX_PATH}")
     print(f"Wrote {PAGES_PATH}")
 
 

@@ -36,7 +36,7 @@ Build the separate data-pipeline dashboard with:
 python build_data_pipeline_dashboard.py
 ```
 
-The stroke dashboard builder also writes `docs/index.html`, which is the GitHub Pages artifact for this repository. The workflow in `.github/workflows/pages.yml` publishes only that `docs/` directory after changes reach `main`.
+The stroke dashboard builder writes both `index.html` and `docs/index.html`. This keeps the same V3 dashboard as the Pages homepage whether the repository uses branch publishing or the workflow in `.github/workflows/pages.yml`.
 
 The healthcare data-pipeline dashboard is intended for its own `healthcare-data-pipeline` repository and GitHub Pages site.
 
