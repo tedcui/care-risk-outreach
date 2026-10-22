@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -27,6 +28,8 @@ INDEX_PATH = ROOT / "index.html"
 PAGES_DIR = ROOT / "docs"
 PAGES_PATH = PAGES_DIR / "index.html"
 JSON_PATH = OUT_DIR / "dashboard_data_v3.json"
+AI_OUT_DIR = ROOT / "outputs" / "care_risk_ai"
+D1_SEED_PATH = AI_OUT_DIR / "d1_seed.sql"
 RANDOM_STATE = 42
 
 
@@ -36,6 +39,161 @@ def to_records(df: pd.DataFrame):
 
 def pct_label(fraction: float) -> str:
     return f"Top {fraction:.1%}"
+
+
+def sql_literal(value) -> str:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "NULL"
+    if isinstance(value, (bool, np.bool_)):
+        return "1" if value else "0"
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return repr(float(value)) if isinstance(value, (float, np.floating)) else str(int(value))
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def insert_batches(table: str, columns: list[str], rows: list[list], batch_size: int = 100) -> list[str]:
+    statements = []
+    quoted_columns = ", ".join(columns)
+    for start in range(0, len(rows), batch_size):
+        values = []
+        for row in rows[start : start + batch_size]:
+            values.append("(" + ", ".join(sql_literal(value) for value in row) + ")")
+        statements.append(
+            f"INSERT INTO {table} ({quoted_columns}) VALUES\n  " + ",\n  ".join(values) + ";"
+        )
+    return statements
+
+
+def build_d1_seed(data: dict) -> str:
+    lines = [
+        "BEGIN TRANSACTION;",
+        "DELETE FROM scored_patients;",
+        "DELETE FROM model_metrics;",
+        "DELETE FROM subgroup_metrics;",
+        "DELETE FROM capacity_metrics;",
+        "DELETE FROM model_coefficients;",
+    ]
+
+    patient_columns = [
+        "patient_rank",
+        "predicted_risk",
+        "observed_event",
+        "gender",
+        "age",
+        "age_group",
+        "hypertension",
+        "heart_disease",
+        "residence_type",
+        "avg_glucose_level",
+        "glucose_band",
+        "bmi",
+        "bmi_band",
+        "smoking_status",
+        "error_group",
+    ]
+    patient_rows = [
+        [
+            row["rank"],
+            row["predicted_risk"],
+            row["event"],
+            row["gender"],
+            row["age"],
+            row["age_group"],
+            row["hypertension"],
+            row["heart_disease"],
+            row["Residence_type"],
+            row["avg_glucose_level"],
+            row["glucose_band"],
+            row["bmi"],
+            row["bmi_band"],
+            row["smoking_status"],
+            row["error_group"],
+        ]
+        for row in data["records"]
+    ]
+    lines.extend(insert_batches("scored_patients", patient_columns, patient_rows))
+
+    model_columns = [
+        "model",
+        "roc_auc",
+        "pr_auc",
+        "sensitivity",
+        "specificity",
+        "precision",
+        "top10_precision",
+        "top10_recall",
+        "top10_events_reached",
+    ]
+    model_rows = [
+        [
+            row["model"],
+            row["roc_auc"],
+            row["pr_auc"],
+            row["sensitivity"],
+            row["specificity"],
+            row["precision"],
+            row["top10_precision"],
+            row["top10_recall"],
+            row["top10_true_events_reached"],
+        ]
+        for row in data["modelMetrics"]
+    ]
+    lines.extend(insert_batches("model_metrics", model_columns, model_rows))
+
+    subgroup_columns = [
+        "population",
+        "patient_count",
+        "event_rate",
+        "roc_auc",
+        "pr_auc",
+        "recall_top_10",
+        "global_top_10_share",
+    ]
+    subgroup_rows = [
+        [
+            row["population"],
+            row["n"],
+            row["event_rate"],
+            row["auc"],
+            row["pr_auc"],
+            row["recall_top_10"],
+            row["global_top_10_share"],
+        ]
+        for row in data["subgroupPerformance"]
+    ]
+    lines.extend(insert_batches("subgroup_metrics", subgroup_columns, subgroup_rows))
+
+    capacity_columns = [
+        "capacity_fraction",
+        "patients_contacted",
+        "events_found",
+        "precision_at_k",
+        "recall_at_k",
+        "lift",
+        "minimum_score",
+    ]
+    capacity_rows = [
+        [
+            row["capacity_fraction"],
+            row["patients_contacted"],
+            row["true_events_found"],
+            row["precision"],
+            row["recall"],
+            row["lift"],
+            row["min_score"],
+        ]
+        for row in data["capacityTable"]
+    ]
+    lines.extend(insert_batches("capacity_metrics", capacity_columns, capacity_rows))
+
+    coefficient_columns = ["feature", "coefficient", "odds_ratio"]
+    coefficient_rows = [
+        [row["feature"], row["coefficient"], float(np.exp(row["coefficient"]))]
+        for row in data["coefficients"]
+    ]
+    lines.extend(insert_batches("model_coefficients", coefficient_columns, coefficient_rows))
+    lines.append("COMMIT;")
+    return "\n\n".join(lines) + "\n"
 
 
 def build_data() -> dict:
@@ -382,7 +540,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 <title>Care Risk Outreach Dashboard</title>
 <style>
 :root{--ink:#142426;--muted:#617174;--line:#dbe5e3;--soft:#f4f8f7;--surface:#fff;--teal:#0f6b72;--teal2:#4eb5a8;--coral:#c76044;--gold:#d6a63d;--red:#c84436;--navy:#0f2f35;--shadow:0 18px 45px rgba(13,44,48,.11);--radius:8px}
-*{box-sizing:border-box}html,body{overflow-x:hidden}body{margin:0;color:var(--ink);font-family:Aptos,Inter,"Segoe UI",Arial,sans-serif;background:radial-gradient(circle at 18% 0%,rgba(78,181,168,.18),transparent 32rem),linear-gradient(180deg,#eef6f4 0%,#f8fbfa 34%,#fff 100%);line-height:1.45}button,input{font:inherit}.page{width:100%;max-width:1440px;margin:0 auto;padding:28px 28px 48px}.topbar{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:22px}.eyebrow{color:var(--teal);font-weight:800;letter-spacing:.08em;text-transform:uppercase;font-size:12px}h1{margin:6px 0 8px;font-size:clamp(34px,4vw,58px);line-height:1;letter-spacing:0}.dashboard-subtitle{margin:0;color:#506468;font-size:16px;font-weight:700}.status-card{min-width:300px;background:var(--navy);color:#fff;border-radius:var(--radius);padding:18px;box-shadow:var(--shadow)}.status-card .small{color:#b9cfcb;font-size:13px}.status-card .large{font-size:32px;font-weight:800;margin-top:6px}.grid{display:grid;gap:18px}.grid>*,.topbar>*,.card,.metric,.status-card{min-width:0}.summary-grid{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:18px}.main-grid{grid-template-columns:minmax(360px,.86fr) minmax(520px,1.14fr);align-items:stretch}.two-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.patient-grid{grid-template-columns:minmax(0,3fr) minmax(260px,1fr);align-items:start}.card{background:rgba(255,255,255,.88);border:1px solid rgba(219,229,227,.9);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);backdrop-filter:blur(8px);overflow-x:auto}.metric{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:16px 17px}.metric.capacity-state .metric-label,.metric.capacity-state .metric-note{color:rgba(255,255,255,.82)}.metric.capacity-state .metric-value{color:#fff}.metric.capacity-state.enough{background:linear-gradient(135deg,#0f6b72,#4eb5a8);border-color:#4eb5a8}.metric.capacity-state.close{background:linear-gradient(135deg,#d6a63d,#efc95a);border-color:#efc95a}.metric.capacity-state.close .metric-label,.metric.capacity-state.close .metric-note,.metric.capacity-state.close .metric-value{color:#142426}.metric.capacity-state.over{background:linear-gradient(135deg,#c84436,#e46d5b);border-color:#e46d5b}.metric-label{color:var(--muted);font-size:13px;margin-bottom:8px}.metric-value{font-size:30px;font-weight:800;line-height:1}.metric-note{margin-top:7px;color:var(--muted);font-size:12px}h2{margin:0 0 8px;font-size:24px;letter-spacing:0}h3{margin:0 0 10px;font-size:17px}.subtle{color:var(--muted);font-size:14px;margin:0 0 16px}.control-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.pill,.tab-button{border:1px solid var(--line);background:#fff;color:var(--ink);padding:8px 12px;border-radius:999px;cursor:pointer;transition:.18s ease;font-size:14px}.tab-button{border-radius:var(--radius);padding:11px 15px;font-weight:800;box-shadow:0 8px 20px rgba(13,44,48,.07)}.pill.active,.tab-button.active{background:var(--navy);color:#fff;border-color:var(--navy)}.tab-row{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 18px}.tab-panel{display:none}.tab-panel.active{display:block}.capacity-input-row{display:grid;grid-template-columns:minmax(170px,1fr) minmax(150px,.75fr);gap:12px;align-items:end;margin-top:16px}.input-label{color:var(--muted);font-size:13px;display:block;margin-bottom:6px}.number-input{width:100%;border:1px solid var(--line);border-radius:var(--radius);padding:10px 11px;color:var(--ink);background:#fff}.slider-wrap{margin:20px 0 16px}.slider-meta{display:flex;justify-content:space-between;color:var(--muted);font-size:13px;margin-bottom:8px}input[type=range]{width:100%;accent-color:var(--teal)}.capacity-visual{margin:14px 0 4px;padding:12px;border:1px solid var(--line);border-radius:var(--radius);background:#fbfdfc}.capacity-bar{height:15px;border-radius:999px;background:#e3eeec;overflow:hidden}.capacity-fill{height:100%;width:10%;border-radius:999px}.capacity-fill.enough{background:linear-gradient(90deg,#239b73,var(--teal2))}.capacity-fill.close{background:linear-gradient(90deg,#d6a63d,#efc95a)}.capacity-fill.over{background:linear-gradient(90deg,#c84436,#e46d5b)}.capacity-visual-text{display:flex;justify-content:space-between;gap:12px;margin-top:8px;color:var(--muted);font-size:12px}.kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:16px}.chart-box{min-height:380px}svg{max-width:100%;display:block}.chart-label{fill:var(--muted);font-size:12px}.chart-title{fill:var(--ink);font-weight:800;font-size:14px}table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;background:#eaf3f1;color:#24464a;font-size:12px;text-transform:uppercase;letter-spacing:.04em;padding:10px}td{border-bottom:1px solid var(--line);padding:10px;vertical-align:top}tr:last-child td{border-bottom:0}.patient-table tbody tr{cursor:pointer}.patient-table tbody tr:hover,.patient-table tbody tr.selected{background:#f1f7f5}.priority-badge{display:inline-flex;align-items:center;justify-content:center;min-width:68px;border-radius:999px;padding:5px 10px;color:#fff;font-weight:800;font-size:12px}.priority-high{background:#c84436}.priority-medium{background:#d8832f}.priority-low{background:#d6a63d;color:#142426}.insight-card{position:sticky;top:18px}.insight-score{font-size:42px;line-height:1;font-weight:900;margin:10px 0;color:var(--navy)}.insight-box{border:1px solid var(--line);border-radius:var(--radius);padding:12px;margin-top:12px;background:#fbfdfc}.insight-box strong{display:block;margin-bottom:6px}.insight-box ul{margin:0;padding-left:18px;color:#44595c}.section{margin-top:18px}.callout{border-left:4px solid var(--coral);padding:12px 14px;background:#fff7f3;color:#4f332c;border-radius:0 var(--radius) var(--radius) 0;font-size:14px}.error-profile{grid-template-columns:repeat(3,minmax(0,1fr))}.mini{padding:12px;border:1px solid var(--line);border-radius:var(--radius);background:#fbfdfc}.mini strong{display:block;font-size:20px}.mini span{color:var(--muted);font-size:12px}.bar-row{display:grid;grid-template-columns:190px 1fr 70px;gap:10px;align-items:center;margin:9px 0;font-size:13px}.bar-track{height:12px;background:#e9f1ef;border-radius:999px;overflow:hidden}.bar-fill{height:100%;border-radius:999px;background:var(--teal)}.bar-fill.negative{background:var(--coral)}@media(max-width:1050px){.topbar,.main-grid,.two-grid,.patient-grid{grid-template-columns:1fr;display:grid}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.status-card{min-width:0}.insight-card{position:static}}@media(max-width:640px){.page{width:100vw;max-width:100vw;padding:18px}.topbar,.summary-grid,.main-grid,.two-grid,.patient-grid{width:100%;max-width:calc(100vw - 36px)}.status-card,.card,.metric{width:100%;max-width:calc(100vw - 36px)}.summary-grid,.kpi-grid,.error-profile,.capacity-input-row{grid-template-columns:1fr}.bar-row{grid-template-columns:1fr}h1{max-width:calc(100vw - 36px);font-size:29px;overflow-wrap:break-word}table{min-width:620px}.slider-meta{display:grid;gap:4px}}
+*{box-sizing:border-box}html,body{overflow-x:hidden}body{margin:0;color:var(--ink);font-family:Aptos,Inter,"Segoe UI",Arial,sans-serif;background:radial-gradient(circle at 18% 0%,rgba(78,181,168,.18),transparent 32rem),linear-gradient(180deg,#eef6f4 0%,#f8fbfa 34%,#fff 100%);line-height:1.45}button,input,textarea{font:inherit}.page{width:100%;max-width:1440px;margin:0 auto;padding:28px 28px 48px}.topbar{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:22px}.eyebrow{color:var(--teal);font-weight:800;letter-spacing:.08em;text-transform:uppercase;font-size:12px}h1{margin:6px 0 8px;font-size:clamp(34px,4vw,58px);line-height:1;letter-spacing:0}.dashboard-subtitle{margin:0;color:#506468;font-size:16px;font-weight:700}.status-card{min-width:300px;background:var(--navy);color:#fff;border-radius:var(--radius);padding:18px;box-shadow:var(--shadow)}.status-card .small{color:#b9cfcb;font-size:13px}.status-card .large{font-size:32px;font-weight:800;margin-top:6px}.grid{display:grid;gap:18px}.grid>*,.topbar>*,.card,.metric,.status-card{min-width:0}.summary-grid{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:18px}.main-grid{grid-template-columns:minmax(360px,.86fr) minmax(520px,1.14fr);align-items:stretch}.two-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.patient-grid{grid-template-columns:minmax(0,3fr) minmax(260px,1fr);align-items:start}.card{background:rgba(255,255,255,.88);border:1px solid rgba(219,229,227,.9);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);backdrop-filter:blur(8px);overflow-x:auto}.metric{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:16px 17px}.metric.capacity-state .metric-label,.metric.capacity-state .metric-note{color:rgba(255,255,255,.82)}.metric.capacity-state .metric-value{color:#fff}.metric.capacity-state.enough{background:linear-gradient(135deg,#0f6b72,#4eb5a8);border-color:#4eb5a8}.metric.capacity-state.close{background:linear-gradient(135deg,#d6a63d,#efc95a);border-color:#efc95a}.metric.capacity-state.close .metric-label,.metric.capacity-state.close .metric-note,.metric.capacity-state.close .metric-value{color:#142426}.metric.capacity-state.over{background:linear-gradient(135deg,#c84436,#e46d5b);border-color:#e46d5b}.metric-label{color:var(--muted);font-size:13px;margin-bottom:8px}.metric-value{font-size:30px;font-weight:800;line-height:1}.metric-note{margin-top:7px;color:var(--muted);font-size:12px}h2{margin:0 0 8px;font-size:24px;letter-spacing:0}h3{margin:0 0 10px;font-size:17px}.subtle{color:var(--muted);font-size:14px;margin:0 0 16px}.control-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.pill,.tab-button{border:1px solid var(--line);background:#fff;color:var(--ink);padding:8px 12px;border-radius:999px;cursor:pointer;transition:.18s ease;font-size:14px}.tab-button{border-radius:var(--radius);padding:11px 15px;font-weight:800;box-shadow:0 8px 20px rgba(13,44,48,.07)}.pill.active,.tab-button.active{background:var(--navy);color:#fff;border-color:var(--navy)}.tab-row{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 18px}.tab-panel{display:none}.tab-panel.active{display:block}.capacity-input-row{display:grid;grid-template-columns:minmax(170px,1fr) minmax(150px,.75fr);gap:12px;align-items:end;margin-top:16px}.input-label{color:var(--muted);font-size:13px;display:block;margin-bottom:6px}.number-input{width:100%;border:1px solid var(--line);border-radius:var(--radius);padding:10px 11px;color:var(--ink);background:#fff}.slider-wrap{margin:20px 0 16px}.slider-meta{display:flex;justify-content:space-between;color:var(--muted);font-size:13px;margin-bottom:8px}input[type=range]{width:100%;accent-color:var(--teal)}.capacity-visual{margin:14px 0 4px;padding:12px;border:1px solid var(--line);border-radius:var(--radius);background:#fbfdfc}.capacity-bar{height:15px;border-radius:999px;background:#e3eeec;overflow:hidden}.capacity-fill{height:100%;width:10%;border-radius:999px}.capacity-fill.enough{background:linear-gradient(90deg,#239b73,var(--teal2))}.capacity-fill.close{background:linear-gradient(90deg,#d6a63d,#efc95a)}.capacity-fill.over{background:linear-gradient(90deg,#c84436,#e46d5b)}.capacity-visual-text{display:flex;justify-content:space-between;gap:12px;margin-top:8px;color:var(--muted);font-size:12px}.kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:16px}.chart-box{min-height:380px}svg{max-width:100%;display:block}.chart-label{fill:var(--muted);font-size:12px}.chart-title{fill:var(--ink);font-weight:800;font-size:14px}table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;background:#eaf3f1;color:#24464a;font-size:12px;text-transform:uppercase;letter-spacing:.04em;padding:10px}td{border-bottom:1px solid var(--line);padding:10px;vertical-align:top}tr:last-child td{border-bottom:0}.patient-table tbody tr{cursor:pointer}.patient-table tbody tr:hover,.patient-table tbody tr.selected{background:#f1f7f5}.priority-badge{display:inline-flex;align-items:center;justify-content:center;min-width:68px;border-radius:999px;padding:5px 10px;color:#fff;font-weight:800;font-size:12px}.priority-high{background:#c84436}.priority-medium{background:#d8832f}.priority-low{background:#d6a63d;color:#142426}.insight-card{position:sticky;top:18px}.insight-score{font-size:42px;line-height:1;font-weight:900;margin:10px 0;color:var(--navy)}.insight-box{border:1px solid var(--line);border-radius:var(--radius);padding:12px;margin-top:12px;background:#fbfdfc}.insight-box strong{display:block;margin-bottom:6px}.insight-box ul{margin:0;padding-left:18px;color:#44595c}.section{margin-top:18px}.callout{border-left:4px solid var(--coral);padding:12px 14px;background:#fff7f3;color:#4f332c;border-radius:0 var(--radius) var(--radius) 0;font-size:14px}.error-profile{grid-template-columns:repeat(3,minmax(0,1fr))}.mini{padding:12px;border:1px solid var(--line);border-radius:var(--radius);background:#fbfdfc}.mini strong{display:block;font-size:20px}.mini span{color:var(--muted);font-size:12px}.bar-row{display:grid;grid-template-columns:190px 1fr 70px;gap:10px;align-items:center;margin:9px 0;font-size:13px}.bar-track{height:12px;background:#e9f1ef;border-radius:999px;overflow:hidden}.bar-fill{height:100%;border-radius:999px;background:var(--teal)}.bar-fill.negative{background:var(--coral)}@media(max-width:1050px){.topbar,.main-grid,.two-grid,.patient-grid{grid-template-columns:1fr;display:grid}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.status-card{min-width:0}.insight-card{position:static}}@media(max-width:640px){.page{width:100vw;max-width:100vw;padding:18px}.topbar,.summary-grid,.main-grid,.two-grid,.patient-grid{width:100%;max-width:calc(100vw - 36px)}.status-card,.card,.metric{width:100%;max-width:calc(100vw - 36px)}.summary-grid,.kpi-grid,.error-profile,.capacity-input-row{grid-template-columns:1fr}.bar-row{grid-template-columns:1fr}h1{max-width:calc(100vw - 36px);font-size:29px;overflow-wrap:break-word}table{min-width:620px}.slider-meta{display:grid;gap:4px}}
 .metric.capacity-state,.metric.capacity-state.enough,.metric.capacity-state.close,.metric.capacity-state.over{background:var(--surface);border-color:var(--line)}
 .metric.capacity-state .metric-label,.metric.capacity-state .metric-note,.metric.capacity-state.close .metric-label,.metric.capacity-state.close .metric-note{color:var(--muted)}
 .metric.capacity-state.enough .metric-value{color:#0f6b72}.metric.capacity-state.close .metric-value{color:#b47b13}.metric.capacity-state.over .metric-value{color:#c84436}
@@ -390,6 +548,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 .caregiver-profile{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.match-score{font-size:42px;line-height:1;font-weight:900;color:#0f6b72;margin:8px 0}.match-badge{display:inline-flex;border-radius:999px;padding:5px 10px;font-weight:800;font-size:12px;background:#e5f3ef;color:#0f6b72}.caregiver-table tbody tr{cursor:pointer}.caregiver-table tbody tr:hover,.caregiver-table tbody tr.selected{background:#f1f7f5}.fit-good{color:#0f6b72;font-weight:800}.fit-watch{color:#b47b13;font-weight:800}
 .outcome-bars{display:grid;gap:12px}.outcome-bar-row{display:grid;grid-template-columns:190px 1fr 80px;gap:12px;align-items:center}.outcome-track{height:14px;background:#e3eeec;border-radius:999px;overflow:hidden}.outcome-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,#0f6b72,#4eb5a8)}.outcome-target{height:100%;border-left:3px solid #c76044}
 .trend{display:inline-flex;align-items:center;gap:7px}.tri{width:0;height:0;display:inline-block}.tri.up{border-left:7px solid transparent;border-right:7px solid transparent;border-bottom:12px solid #239b73}.tri.down{border-left:7px solid transparent;border-right:7px solid transparent;border-top:12px solid #c84436}.feedback-svg{width:100%;max-width:440px;margin:8px 0 14px}.feedback-label{fill:#617174;font-size:12px}.feedback-title{fill:#142426;font-size:14px;font-weight:800}
+.ai-workbench{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}.ai-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}.ai-head h3{margin:0}.ai-status{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:11px;font-weight:800;text-transform:uppercase}.ai-dot{width:8px;height:8px;border-radius:50%;background:#9aa7a5}.ai-status.ready .ai-dot{background:#239b73}.ai-status.checking .ai-dot{background:#d6a63d}.ai-status.offline .ai-dot{background:#c84436}.ai-button{width:100%;border:0;border-radius:var(--radius);padding:10px 12px;background:var(--teal);color:#fff;font-weight:800;cursor:pointer}.ai-button.secondary{width:auto;background:var(--navy)}.ai-button:disabled{opacity:.55;cursor:wait}.ai-scope{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:12px 0}.ai-scope button{border:1px solid var(--line);border-radius:var(--radius);background:#fff;color:var(--ink);padding:8px;font-size:12px;font-weight:800;cursor:pointer}.ai-scope button.active{background:var(--navy);border-color:var(--navy);color:#fff}.ai-question{width:100%;min-height:88px;resize:vertical;border:1px solid var(--line);border-radius:var(--radius);padding:10px;background:#fff;color:var(--ink)}.ai-actions{display:flex;justify-content:flex-end;margin-top:8px}.ai-suggestions{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.ai-suggestion{border:1px solid var(--line);border-radius:999px;background:#fff;color:#365256;padding:6px 9px;font-size:11px;cursor:pointer}.ai-result{margin-top:12px;padding:12px;border:1px solid #bcded8;border-radius:var(--radius);background:#eef8f5}.ai-result.error{border-color:#efc5ba;background:#fff5f2}.ai-result h3{font-size:15px;margin-bottom:6px}.ai-result p{font-size:13px;margin:0 0 8px}.ai-result ul{font-size:12px;margin:8px 0;padding-left:18px}.ai-caveat{color:var(--muted);font-size:11px}.ai-sql{margin-top:10px}.ai-sql summary{cursor:pointer;color:var(--teal);font-size:12px;font-weight:800}.ai-sql pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#102f35;color:#dff4ef;border-radius:var(--radius);padding:10px;font-size:11px}.ai-divider{margin:16px 0;border-top:1px solid var(--line)}
 @media(max-width:640px){.page{width:100%;max-width:100%;padding:18px}.topbar,.summary-grid,.main-grid,.two-grid,.patient-grid,.tab-row{width:100%;max-width:100%}.status-card,.card,.metric{width:100%;max-width:100%}.tab-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.tab-button{width:100%;min-height:48px;white-space:normal}.tab-button:last-child{grid-column:1/-1}h1{max-width:100%}}
 </style>
 </head>
@@ -400,13 +559,15 @@ HTML_TEMPLATE = r"""<!doctype html>
 <nav class="tab-row" aria-label="Dashboard sections"><button class="tab-button active" data-tab="outreach">Outreach planner</button><button class="tab-button" data-tab="performance">Model &amp; subgroup review</button><button class="tab-button" data-tab="patients">Priority patient list</button><button class="tab-button" data-tab="caregiver">Caregiver match</button><button class="tab-button" data-tab="outcomes">Program outcomes</button></nav>
 <section id="tab-outreach" class="tab-panel active"><div class="grid main-grid"><div class="card"><h2>Outreach capacity planner</h2><p class="subtle">Use the population filter, team capacity, and outreach slider to build an achievable prioritized call plan.</p><div class="control-row" id="populationFilters"></div><div class="capacity-input-row"><div><label class="input-label" for="manualCapacityInput">Manual patient capacity</label><input class="number-input" id="manualCapacityInput" type="number" min="1" step="1" value="__DEFAULT_CAPACITY__"></div><div><span class="input-label">Current outreach share</span><strong id="capacityLabel">10%</strong></div></div><div class="slider-wrap"><div class="slider-meta"><span>Adjust by percent</span><span>1% to 30% of selected patients</span></div><input id="capacitySlider" type="range" min="1" max="30" value="10" step="1"></div><div class="capacity-visual"><div class="capacity-bar"><div class="capacity-fill enough" id="capacityFill"></div></div><div class="capacity-visual-text"><span id="capacityUsedText">__DEFAULT_CAPACITY__ selected</span><span id="capacityRemainingText">0 capacity remaining</span></div></div><div class="grid kpi-grid" id="capacityKpis"></div><div class="callout" id="capacityMessage"></div></div><div class="card chart-box"><h2>Outreach value curve</h2><p class="subtle">Cumulative gains estimates operational event capture; the lower chart provides held-out precision-recall context.</p><div id="gainsChart"></div></div></div><div class="card section"><h2>Capacity reference points</h2><p class="subtle">Compare practical call-list sizes and expected yield across the full scored population.</p><div id="capacityTable"></div></div></section>
 <section id="tab-performance" class="tab-panel"><div class="callout section">This MVP presents the source dataset's binary outcome as a high-risk event. A production program would require a clinically governed event definition, prediction window, and validation plan.</div><div class="grid two-grid section"><div class="card"><h2>Model performance</h2><p class="subtle">Unweighted logistic regression is recommended by held-out PR AUC and supports transparent review.</p><div id="modelTable"></div></div><div class="card"><h2>Initial subgroup assessment</h2><p class="subtle">This is not a fairness conclusion. It is an initial performance check requiring deeper validation before deployment.</p><div id="subgroupTable"></div></div></div><div class="grid two-grid section"><div class="card"><h2>Classification review</h2><p class="subtle">The top 10% is treated as outreach-positive. Compare correct and incorrect classifications to identify model limitations.</p><div class="control-row" id="errorButtons"><button class="pill active" data-error="False negative">False negatives</button><button class="pill" data-error="False positive">False positives</button><button class="pill" data-error="True positive">True positives</button><button class="pill" data-error="True negative">True negatives</button></div><div class="grid error-profile section" id="errorProfile"></div><h3 class="section" id="patternTitle">Patterns</h3><div id="patternTable"></div></div><div class="card"><h2>Risk drivers</h2><p class="subtle">Predictive associations used for ranking, not evidence of causal effects.</p><div class="control-row"><button class="pill active" data-driver="positive">Higher predicted risk</button><button class="pill" data-driver="negative">Lower predicted risk</button></div><div id="driverChart" class="section"></div></div></div></section>
-<section id="tab-patients" class="tab-panel"><div class="grid patient-grid section"><div class="card"><h2>Priority patient list</h2><p class="subtle" id="patientListNote">Patients currently selected for outreach.</p><div class="control-row section" id="priorityFilters"></div><div id="patientTable"></div></div><aside class="card insight-card"><h2>AI insight</h2><p class="subtle">Demo narrative for the selected patient. Odds ratios are predictive model signals, not causal effects.</p><div id="patientInsight"></div></aside></div></section>
-<section id="tab-caregiver" class="tab-panel"><div class="grid patient-grid section"><div class="card"><h2>Caregiver match</h2><p class="subtle">Demo routing view for assigning a high-risk outreach patient to an available care-team member.</p><div id="caregiverPatient"></div><h3 class="section">Available caregivers</h3><div id="caregiverTable"></div></div><aside class="card insight-card"><h2>Match insight</h2><p class="subtle">Demo explanation for the highlighted caregiver. This is illustrative routing logic, not a staffing rule.</p><div id="caregiverInsight"></div></aside></div></section>
+<section id="tab-patients" class="tab-panel"><div class="grid patient-grid section"><div class="card"><h2>Priority patient list</h2><p class="subtle" id="patientListNote">Patients currently selected for outreach.</p><div class="control-row section" id="priorityFilters"></div><div id="patientTable"></div></div><aside class="card insight-card"><h2>AI insight</h2><p class="subtle">Grounded in the selected patient's model score and predictive signals. Predictive associations are not causal effects.</p><div id="patientInsight"></div></aside></div></section>
+<section id="tab-caregiver" class="tab-panel"><div class="grid patient-grid section"><div class="card"><h2>Caregiver match</h2><p class="subtle">Demo routing view for assigning a high-risk outreach patient to an available care-team member.</p><div id="caregiverPatient"></div><h3 class="section">Available caregivers</h3><div id="caregiverTable"></div></div><aside class="card insight-card"><h2>Match insight</h2><p class="subtle">Grounded in the highlighted caregiver's specialty, availability, distance, capacity, and routing score.</p><div id="caregiverInsight"></div></aside></div></section>
 <section id="tab-outcomes" class="tab-panel"><div class="grid two-grid section"><div class="card"><h2>Program outcomes</h2><p class="subtle">MVP tracking view for patient engagement and outreach operations after intervention launch.</p><div class="grid kpi-grid" id="outcomeKpis"></div><div class="section" id="outcomeFunnel"></div></div><div class="card"><h2>Caregiver feedback</h2><p class="subtle">Demo readout from care-team feedback after the outreach workflow is running.</p><div id="outcomeInsight"></div></div></div><div class="card section"><h2>Patient and operations scorecard</h2><p class="subtle">Measures to monitor weekly once the program is running.</p><div id="outcomeTable"></div></div></section>
 </main>
 <script>
 const DATA = __DATA__;
+const CONFIG = {aiApiBase:"__AI_API_BASE__"};
 const state = {population:"All patients", capacity:10, manualCapacity:DATA.summary.default_capacity, dashboard:"outreach", driver:"positive", errorGroup:"False negative", patientIndex:0, priorityFilter:"All", patientSortKey:"contact_rank", patientSortDir:"asc", caregiverId:"cg-003"};
+const aiSession={health:"checking",patient:{scope:"patient",contextKey:"",context:null,insight:null,answer:null,question:"",busy:false,error:""},caregiver:{scope:"caregiver",contextKey:"",context:null,insight:null,answer:null,question:"",busy:false,error:""}};
 const filters=["All patients","Male","Female","Age <65","Age >=65","Urban","Rural"];
 const colors=["#0f6b72","#c76044","#d6a63d","#4eb5a8"];
 const CAREGIVERS=[
@@ -421,6 +582,20 @@ const fmtNum=v=>Number.isFinite(v)?Math.round(v).toLocaleString():"N/A";
 const fmtFloat=(v,d=1)=>Number.isFinite(v)?v.toFixed(d):"N/A";
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const friendly=s=>String(s).replace("avg_glucose_level","Glucose").replace("heart_disease","Heart disease").replace("hypertension","Hypertension").replace("smoking_status_","Smoking: ").replace("work_type_","Work: ").replace("Residence_type_","Residence: ").replace("ever_married_","Ever married: ").replace("gender_","Gender: ").replace("bmi","BMI").replace("age","Age");
+function aiApiBase(){if(CONFIG.aiApiBase)return CONFIG.aiApiBase;if(["localhost","127.0.0.1"].includes(location.hostname)||location.protocol==="file:")return"http://127.0.0.1:8787";return""}
+function patientAiContext(r,m){if(!r)return{};return{priority:r.priority?.label||"Selected",predicted_risk:r.predicted_risk,queue_rank:r.contact_rank||r.rank,contacted_count:m?.k||null,age:r.age,gender:r.gender,residence:r.Residence_type,hypertension:Boolean(r.hypertension),heart_disease:Boolean(r.heart_disease),avg_glucose_level:r.avg_glucose_level,glucose_band:r.glucose_band,bmi:r.bmi,bmi_band:r.bmi_band,smoking_status:r.smoking_status,model_signals:[{feature:"Age",odds_ratio:oddsRatio("age")},{feature:"Hypertension",odds_ratio:oddsRatio("hypertension")},{feature:"Heart disease",odds_ratio:oddsRatio("heart_disease")},{feature:"Glucose",odds_ratio:oddsRatio("avg_glucose_level")}]}}
+function caregiverAiContext(c,p){return{patient:patientAiContext({...p,priority:{label:"High"},contact_rank:p.rank},{k:Math.max(1,Math.ceil(DATA.summary.model_rows*.1))}),caregiver:{name:c.name,role:c.role,languages:c.languages,specialty:c.specialty,availability:c.availability,distance_miles:c.distance,open_capacity:c.capacity,match_score:c.score,strengths:c.strengths,watch_outs:c.watchouts}}}
+function aiStatusMarkup(){const labels={checking:"Checking AI",ready:"Workers AI live",offline:"Fallback active"};return`<span class="ai-status ${aiSession.health}"><span class="ai-dot"></span>${labels[aiSession.health]}</span>`}
+function aiList(items){return items?.length?`<ul>${items.map(item=>`<li>${esc(item)}</li>`).join("")}</ul>`:""}
+function aiInsightMarkup(value){if(!value)return"";return`<div class="ai-result"><h3>${esc(value.headline)}</h3><p>${esc(value.summary)}</p>${aiList(value.supporting_factors)}${value.watch_outs?.length?`<strong>Watch-outs</strong>${aiList(value.watch_outs)}`:""}<div class="ai-caveat">Generated from the displayed model and routing facts.</div></div>`}
+function aiAnswerMarkup(value){if(!value)return"";return`<div class="ai-result"><h3>${esc(value.title||"AI answer")}</h3><p>${esc(value.answer)}</p>${aiList(value.key_points)}<div class="ai-caveat">${esc(value.caveat)}</div>${value.sql?`<details class="ai-sql"><summary>View generated SQL</summary><pre>${esc(value.sql)}</pre></details>`:""}</div>`}
+function aiErrorMarkup(message){return message?`<div class="ai-result error"><h3>AI request unavailable</h3><p>${esc(message)}</p><div class="ai-caveat">The deterministic model explanation above remains available.</div></div>`:""}
+function suggestionsFor(kind,scope){if(scope==="population")return["How many top-ranked patients are age 65 or older?","Compare average predicted risk by age group.","Which subgroup has the highest PR AUC?"];return kind==="patient"?["Why is this patient prioritized?","Which model signals matter most?","What should the reviewer verify?"]:["Why is this caregiver recommended?","What are the main tradeoffs?","Is this caregiver available today?"]}
+async function apiPost(path,payload){const base=aiApiBase();if(!base)throw new Error("The live AI endpoint has not been published. Use the local preview after starting the Worker.");const response=await fetch(`${base}${path}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});const data=await response.json().catch(()=>({error:"The AI service returned an unreadable response."}));if(!response.ok)throw new Error(data.error||`AI request failed (${response.status}).`);return data}
+function mountAiWorkbench(kind,context,contextKey){const target=document.getElementById(`${kind}Insight`);if(!target)return;const session=aiSession[kind];if(session.contextKey!==contextKey){session.contextKey=contextKey;session.context=context;session.insight=null;session.answer=null;session.question="";session.error=""}else{session.context=context}target.querySelector(".ai-workbench")?.remove();const scopeLabel=kind==="patient"?"Selected patient":"Selected match";const suggestions=suggestionsFor(kind,session.scope);const workbench=document.createElement("section");workbench.className="ai-workbench";workbench.innerHTML=`<div class="ai-head"><h3>Workers AI</h3>${aiStatusMarkup()}</div><button class="ai-button" data-ai-generate="${kind}" ${session.busy?"disabled":""}>${session.busy?"Generating...":"Generate live insight"}</button>${aiInsightMarkup(session.insight)}<div class="ai-divider"></div><h3>Ask the results</h3><div class="ai-scope"><button data-ai-scope="${kind}" data-scope-value="${kind}" class="${session.scope===kind?"active":""}">${scopeLabel}</button><button data-ai-scope="${kind}" data-scope-value="population" class="${session.scope==="population"?"active":""}">Outreach population</button></div><div class="ai-suggestions">${suggestions.map(q=>`<button class="ai-suggestion" data-ai-suggestion="${kind}" data-question="${esc(q)}">${esc(q)}</button>`).join("")}</div><textarea class="ai-question" data-ai-question="${kind}" maxlength="500" placeholder="Ask about the model results">${esc(session.question)}</textarea><div class="ai-actions"><button class="ai-button secondary" data-ai-ask="${kind}" ${session.busy?"disabled":""}>${session.busy?"Working...":"Ask AI"}</button></div>${aiAnswerMarkup(session.answer)}${aiErrorMarkup(session.error)}`;target.appendChild(workbench);workbench.querySelector(`[data-ai-generate="${kind}"]`).onclick=async()=>{session.busy=true;session.error="";mountAiWorkbench(kind,context,contextKey);try{session.insight=await apiPost("/api/insight",{kind,context})}catch(error){session.error=error.message}finally{session.busy=false;mountAiWorkbench(kind,context,contextKey)}};workbench.querySelectorAll(`[data-ai-scope="${kind}"]`).forEach(button=>button.onclick=()=>{session.scope=button.dataset.scopeValue;session.answer=null;session.error="";mountAiWorkbench(kind,context,contextKey)});workbench.querySelectorAll(`[data-ai-suggestion="${kind}"]`).forEach(button=>button.onclick=()=>{session.question=button.dataset.question;mountAiWorkbench(kind,context,contextKey)});const input=workbench.querySelector(`[data-ai-question="${kind}"]`);input.oninput=()=>{session.question=input.value};workbench.querySelector(`[data-ai-ask="${kind}"]`).onclick=async()=>{session.question=input.value.trim();if(!session.question){session.error="Enter a question before asking the AI assistant.";mountAiWorkbench(kind,context,contextKey);return}session.busy=true;session.error="";session.answer=null;mountAiWorkbench(kind,context,contextKey);try{session.answer=await apiPost("/api/ask",{question:session.question,scope:session.scope,context})}catch(error){session.error=error.message}finally{session.busy=false;mountAiWorkbench(kind,context,contextKey)}}}
+function mountAiPanels(records){const m=capacityMetrics(records),flagged=priorityRows(records.slice(0,m.k)),filtered=state.priorityFilter==="All"?flagged:flagged.filter(r=>r.priority.label===state.priorityFilter),rows=sortRows(filtered),patient=rows[state.patientIndex];mountAiWorkbench("patient",patientAiContext(patient,m),patient?`patient-${patient.rank}-${m.k}`:"patient-empty");const p=demoCaregiverPatient(),caregiver=CAREGIVERS.find(c=>c.id===state.caregiverId)||CAREGIVERS[0];mountAiWorkbench("caregiver",caregiverAiContext(caregiver,p),`caregiver-${caregiver.id}`)}
+function refreshAiStatus(){document.querySelectorAll(".ai-status").forEach(el=>{el.outerHTML=aiStatusMarkup()})}
+async function checkAiHealth(){const base=aiApiBase();if(!base){aiSession.health="offline";refreshAiStatus();return}try{const response=await fetch(`${base}/api/health`);const data=await response.json();aiSession.health=response.ok&&data.ai_binding?"ready":"offline"}catch{aiSession.health="offline"}refreshAiStatus()}
 function populationFilter(r){if(state.population==="All patients")return true;if(state.population==="Male")return r.gender==="Male";if(state.population==="Female")return r.gender==="Female";if(state.population==="Age <65")return r.age<65;if(state.population==="Age >=65")return r.age>=65;if(state.population==="Urban")return r.Residence_type==="Urban";if(state.population==="Rural")return r.Residence_type==="Rural";return true}
 function selectedRecords(){return DATA.records.filter(populationFilter).slice().sort((a,b)=>b.predicted_risk-a.predicted_risk)}
 function capacityMetrics(records){const n=records.length,total=records.reduce((s,r)=>s+r.event,0),k=Math.max(1,Math.min(n,Math.ceil(n*state.capacity/100))),sel=records.slice(0,k),found=sel.reduce((s,r)=>s+r.event,0),precision=found/k,recall=total?found/total:NaN,base=n?total/n:NaN,lift=base?precision/base:NaN,minRisk=sel.length?sel[sel.length-1].predicted_risk:NaN;return{n,totalEvents:total,k,found,precision,recall,lift,minRisk,percent:n?k/n*100:0,baseRate:base}}
@@ -442,7 +617,7 @@ function sortVal(r,key){if(key==="priority")return r.contact_rank;if(key==="risk
 function sortRows(rows){const dir=state.patientSortDir==="asc"?1:-1;return rows.slice().sort((a,b)=>{const av=sortVal(a,state.patientSortKey),bv=sortVal(b,state.patientSortKey);if(typeof av==="string"||typeof bv==="string")return String(av).localeCompare(String(bv))*dir;return (av-bv)*dir})}
 function sortHead(label,key){const mark=state.patientSortKey===key?`<span class="sort-mark">${state.patientSortDir==="asc"?"▲":"▼"}</span>`:"";return`<th class="sortable" data-sort="${key}">${label}${mark}</th>`}
 function renderPatientDetails(records){const m=capacityMetrics(records);const flagged=priorityRows(records.slice(0,m.k));const filtered=state.priorityFilter==="All"?flagged:flagged.filter(r=>r.priority.label===state.priorityFilter);const rows=sortRows(filtered);if(state.patientIndex>=rows.length)state.patientIndex=0;renderPriorityFilters(flagged);document.getElementById("patientListNote").textContent=`Showing ${fmtNum(rows.length)} of ${fmtNum(flagged.length)} patients flagged for contact at the current ${m.percent.toFixed(1)}% outreach setting.`;document.getElementById("patientTable").innerHTML=`<table class="patient-table"><thead><tr>${sortHead("Priority","priority")}${sortHead("Rank","contact_rank")}${sortHead("Risk score","risk")}${sortHead("Age","age")}${sortHead("Gender","gender")}${sortHead("Residence","residence")}${sortHead("Hypertension","hypertension")}${sortHead("Heart disease","heart_disease")}${sortHead("Glucose","glucose")}${sortHead("BMI","bmi")}${sortHead("Smoking","smoking")}</tr></thead><tbody>${rows.map((r,i)=>{const p=r.priority;return`<tr class="${i===state.patientIndex?"selected":""}" data-patient-row="${i}"><td><span class="priority-badge priority-${p.cls}">${p.label}</span></td><td>${fmtNum(r.contact_rank)}</td><td><strong>${fmtPct(r.predicted_risk)}</strong></td><td>${fmtFloat(r.age,0)}</td><td>${esc(r.gender)}</td><td>${esc(r.Residence_type)}</td><td>${r.hypertension?"Yes":"No"}</td><td>${r.heart_disease?"Yes":"No"}</td><td>${esc(r.glucose_band)}</td><td>${esc(r.bmi_band)}</td><td>${esc(r.smoking_status)}</td></tr>`}).join("")}</tbody></table>`;document.querySelectorAll("[data-sort]").forEach(th=>th.onclick=()=>{const key=th.dataset.sort;if(state.patientSortKey===key){state.patientSortDir=state.patientSortDir==="asc"?"desc":"asc"}else{state.patientSortKey=key;state.patientSortDir="asc"}state.patientIndex=0;renderPatientDetails(selectedRecords())});document.querySelectorAll("[data-patient-row]").forEach(row=>row.onclick=()=>{state.patientIndex=Number(row.dataset.patientRow);renderPatientDetails(selectedRecords())});renderPatientInsight(rows[state.patientIndex],m)}
-function renderPatientInsight(r,m){const el=document.getElementById("patientInsight");if(!r){el.innerHTML=`<div class="insight-box"><strong>No patients flagged</strong><p class="subtle">Adjust the outreach percentage, population filter, or priority filter to generate a contact list.</p></div>`;return}const p=r.priority;const drivers=[];if(r.age>=65)drivers.push("older age");if(r.hypertension)drivers.push("hypertension");if(r.heart_disease)drivers.push("heart disease");if(r.avg_glucose_level>=126)drivers.push("elevated glucose");if(Number(r.bmi)>=30)drivers.push("higher BMI");if(!drivers.length)drivers.push("relative ranking within the selected population");const ageOr=oddsRatio("age"),htnOr=oddsRatio("hypertension"),heartOr=oddsRatio("heart_disease"),glucoseOr=oddsRatio("avg_glucose_level");const tierText=p.label==="High"?"This patient is in the top third of the current contacted list and should be near the front of the call queue.":p.label==="Medium"?"This patient is in the middle third of the current contacted list and is appropriate for outreach after the highest-priority group.":"This patient is in the final third of the current contacted list, closer to the operating cutoff but still selected by the outreach plan.";el.innerHTML=`<div class="priority-badge priority-${p.cls}">${p.label} priority</div><div class="insight-score">${fmtPct(r.predicted_risk)}</div><p>${tierText}</p><div class="insight-box"><strong>Queue position</strong><p class="subtle">Rank ${fmtNum(r.contact_rank)} of ${fmtNum(m.k)} contacted patients at the current slicer setting.</p></div><div class="insight-box"><strong>Why the model raised this patient</strong><ul>${drivers.map(d=>`<li>${esc(d)}</li>`).join("")}</ul></div><div class="insight-box"><strong>Model signal context</strong><p class="subtle">In the logistic model, higher scaled age has an odds ratio of ${fmtFloat(ageOr,2)}; hypertension ${fmtFloat(htnOr,2)}; heart disease ${fmtFloat(heartOr,2)}; and glucose ${fmtFloat(glucoseOr,2)}. These are predictive associations used for ranking, not causal claims.</p></div><div class="insight-box"><strong>Demo note</strong><p class="subtle">AI summary: prioritize outreach with a prevention-focused conversation, confirm clinical context, and route to care-team review when risk factors are confirmed.</p></div>`}
+function renderPatientInsight(r,m){const el=document.getElementById("patientInsight");if(!r){el.innerHTML=`<div class="insight-box"><strong>No patients flagged</strong><p class="subtle">Adjust the outreach percentage, population filter, or priority filter to generate a contact list.</p></div>`;return}const p=r.priority;const drivers=[];if(r.age>=65)drivers.push("older age");if(r.hypertension)drivers.push("hypertension");if(r.heart_disease)drivers.push("heart disease");if(r.avg_glucose_level>=126)drivers.push("elevated glucose");if(Number(r.bmi)>=30)drivers.push("higher BMI");if(!drivers.length)drivers.push("relative ranking within the selected population");const ageOr=oddsRatio("age"),htnOr=oddsRatio("hypertension"),heartOr=oddsRatio("heart_disease"),glucoseOr=oddsRatio("avg_glucose_level");const tierText=p.label==="High"?"This patient is in the top third of the current contacted list and should be near the front of the call queue.":p.label==="Medium"?"This patient is in the middle third of the current contacted list and is appropriate for outreach after the highest-priority group.":"This patient is in the final third of the current contacted list, closer to the operating cutoff but still selected by the outreach plan.";el.innerHTML=`<div class="priority-badge priority-${p.cls}">${p.label} priority</div><div class="insight-score">${fmtPct(r.predicted_risk)}</div><p>${tierText}</p><div class="insight-box"><strong>Queue position</strong><p class="subtle">Rank ${fmtNum(r.contact_rank)} of ${fmtNum(m.k)} contacted patients at the current slicer setting.</p></div><div class="insight-box"><strong>Why the model raised this patient</strong><ul>${drivers.map(d=>`<li>${esc(d)}</li>`).join("")}</ul></div><div class="insight-box"><strong>Model signal context</strong><p class="subtle">In the logistic model, higher scaled age has an odds ratio of ${fmtFloat(ageOr,2)}; hypertension ${fmtFloat(htnOr,2)}; heart disease ${fmtFloat(heartOr,2)}; and glucose ${fmtFloat(glucoseOr,2)}. These are predictive associations used for ranking, not causal claims.</p></div><div class="insight-box"><strong>Fallback summary</strong><p class="subtle">Prioritize outreach, confirm clinical context, and route to care-team review when risk factors are confirmed.</p></div>`}
 function demoCaregiverPatient(){return DATA.records.slice().sort((a,b)=>b.predicted_risk-a.predicted_risk)[0]}
 function caregiverFit(c){if(c.score>=90)return{label:"Recommended",cls:"match-badge"};if(c.score>=80)return{label:"Strong backup",cls:"match-badge"};if(c.score>=70)return{label:"Usable",cls:"match-badge"};return{label:"Lower fit",cls:"match-badge"}}
 function renderCaregiverMatch(){const p=demoCaregiverPatient();const selected=CAREGIVERS.find(c=>c.id===state.caregiverId)||CAREGIVERS.slice().sort((a,b)=>b.score-a.score)[0];const profile=[["Patient risk",fmtPct(p.predicted_risk)],["Age",fmtFloat(p.age,0)],["Glucose",esc(p.glucose_band)],["BMI",esc(p.bmi_band)],["Hypertension",p.hypertension?"Yes":"No"],["Heart disease",p.heart_disease?"Yes":"No"],["Residence",esc(p.Residence_type)],["Smoking",esc(p.smoking_status)]];document.getElementById("caregiverPatient").innerHTML=`<div class="caregiver-profile">${profile.map(([l,v])=>`<div class="mini"><strong>${v}</strong><span>${l}</span></div>`).join("")}</div><div class="callout">Fixed demo patient: high-scoring outreach candidate used to show how caregiver routing could work after the model creates a prioritized call list.</div>`;const rows=CAREGIVERS.slice().sort((a,b)=>b.score-a.score);document.getElementById("caregiverTable").innerHTML=`<table class="caregiver-table"><thead><tr><th>Caregiver</th><th>Role</th><th>Specialty</th><th>Availability</th><th>Distance</th><th>Open capacity</th><th>Match</th></tr></thead><tbody>${rows.map(c=>{const fit=caregiverFit(c);return`<tr class="${c.id===selected.id?"selected":""}" data-caregiver="${c.id}"><td><strong>${esc(c.name)}</strong><br><span class="subtle">${esc(c.languages)}</span></td><td>${esc(c.role)}</td><td>${esc(c.specialty)}</td><td>${esc(c.availability)}</td><td>${fmtFloat(c.distance,0)} mi</td><td>${fmtNum(c.capacity)}</td><td><strong>${fmtNum(c.score)}</strong><br><span class="${fit.cls}">${fit.label}</span></td></tr>`}).join("")}</tbody></table>`;document.querySelectorAll("[data-caregiver]").forEach(row=>row.onclick=()=>{state.caregiverId=row.dataset.caregiver;renderCaregiverMatch()});renderCaregiverInsight(selected,p)}
@@ -458,36 +633,61 @@ function renderPatterns(records){const rows=[rateForGroup(records,"Age <65",r=>r
 function renderErrorProfile(records){document.querySelectorAll("[data-error]").forEach(b=>b.classList.toggle("active",b.dataset.error===state.errorGroup));const group=records.filter(r=>r.error_group===state.errorGroup);const avg=(arr,f)=>arr.length?arr.reduce((s,r)=>s+(Number(r[f])||0),0)/arr.length:NaN;const rate=(arr,f)=>arr.length?arr.reduce((s,r)=>s+Number(r[f]||0),0)/arr.length:NaN;const bmi=group.filter(r=>Number.isFinite(Number(r.bmi)));const metrics=[["Patients",fmtNum(group.length)],["Mean age",fmtFloat(avg(group,"age"),1)],["Hypertension",fmtPct(rate(group,"hypertension"))],["Heart disease",fmtPct(rate(group,"heart_disease"))],["Mean glucose",fmtFloat(avg(group,"avg_glucose_level"),1)],["Mean BMI",fmtFloat(avg(bmi,"bmi"),1)],["Avg predicted risk",fmtPct(avg(group,"predicted_risk"))]];document.getElementById("errorProfile").innerHTML=metrics.map(([l,v])=>`<div class="mini"><strong>${v}</strong><span>${l}</span></div>`).join("");renderPatterns(records)}
 function renderDrivers(){document.querySelectorAll("[data-driver]").forEach(b=>b.classList.toggle("active",b.dataset.driver===state.driver));const rows=DATA.coefficients.slice().sort((a,b)=>state.driver==="positive"?b.coefficient-a.coefficient:a.coefficient-b.coefficient).slice(0,8);const maxAbs=Math.max(...rows.map(r=>Math.abs(r.coefficient)))||1;const html=rows.map(r=>`<div class="bar-row"><div>${friendly(r.feature)}</div><div class="bar-track"><div class="bar-fill ${r.coefficient<0?"negative":""}" style="width:${Math.max(3,Math.abs(r.coefficient)/maxAbs*100)}%"></div></div><div>${r.coefficient.toFixed(3)}</div></div>`).join("");document.getElementById("driverChart").innerHTML=html}
 function renderTabs(){document.querySelectorAll("[data-tab]").forEach(b=>b.classList.toggle("active",b.dataset.tab===state.dashboard));document.querySelectorAll(".tab-panel").forEach(p=>p.classList.toggle("active",p.id===`tab-${state.dashboard}`))}
-function renderAll(){renderFilters();const records=selectedRecords();const m=capacityMetrics(records);renderSummaryCards(m);renderCapacity(records,m);renderGains(records,m);renderCurves();renderTables();renderPatientDetails(records);renderCaregiverMatch();renderProgramOutcomes(records);renderErrorProfile(records);renderDrivers();renderTabs()}
+function renderAll(){renderFilters();const records=selectedRecords();const m=capacityMetrics(records);renderSummaryCards(m);renderCapacity(records,m);renderGains(records,m);renderCurves();renderTables();renderPatientDetails(records);renderCaregiverMatch();mountAiPanels(records);renderProgramOutcomes(records);renderErrorProfile(records);renderDrivers();renderTabs()}
 document.getElementById("capacitySlider").addEventListener("input",e=>{state.capacity=Number(e.target.value);state.patientIndex=0;renderAll()});
 document.getElementById("manualCapacityInput").addEventListener("input",e=>{const v=Number(e.target.value);state.manualCapacity=Number.isFinite(v)?Math.max(1,Math.round(v)):1;renderAll()});
 document.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{state.dashboard=b.dataset.tab;renderTabs()});
 document.querySelectorAll("[data-error]").forEach(b=>b.onclick=()=>{state.errorGroup=b.dataset.error;renderErrorProfile(selectedRecords())});
 document.querySelectorAll("[data-driver]").forEach(b=>b.onclick=()=>{state.driver=b.dataset.driver;renderDrivers()});
+document.addEventListener("click",event=>{if(event.target.closest("[data-patient-row],[data-sort],[data-priority],[data-caregiver]")){setTimeout(()=>mountAiPanels(selectedRecords()),0)}});
 document.getElementById("manualCapacityInput").value=String(state.manualCapacity);
 renderAll();
+checkAiHealth();
 </script>
 </body>
 </html>"""
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build the care risk outreach dashboard preview.")
+    parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="Also copy the generated dashboard to index.html and docs/index.html.",
+    )
+    parser.add_argument(
+        "--ai-api-base",
+        default="",
+        help="Production Worker URL to embed. Local previews automatically use port 8787.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    PAGES_DIR.mkdir(parents=True, exist_ok=True)
+    AI_OUT_DIR.mkdir(parents=True, exist_ok=True)
     data = build_data()
     JSON_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    D1_SEED_PATH.write_text(build_d1_seed(data), encoding="utf-8")
     html = (
         HTML_TEMPLATE
         .replace("__DATA__", json.dumps(data, separators=(",", ":")))
         .replace("__DEFAULT_CAPACITY__", str(data["summary"]["default_capacity"]))
+        .replace("__AI_API_BASE__", args.ai_api_base.rstrip("/"))
     )
     HTML_PATH.write_text(html, encoding="utf-8")
-    INDEX_PATH.write_text(html, encoding="utf-8")
-    PAGES_PATH.write_text(html, encoding="utf-8")
     print(f"Wrote {JSON_PATH}")
+    print(f"Wrote {D1_SEED_PATH}")
     print(f"Wrote {HTML_PATH}")
-    print(f"Wrote {INDEX_PATH}")
-    print(f"Wrote {PAGES_PATH}")
+    if args.publish:
+        PAGES_DIR.mkdir(parents=True, exist_ok=True)
+        INDEX_PATH.write_text(html, encoding="utf-8")
+        PAGES_PATH.write_text(html, encoding="utf-8")
+        print(f"Published {INDEX_PATH}")
+        print(f"Published {PAGES_PATH}")
+    else:
+        print("Preview build only; release copies were not changed.")
 
 
 if __name__ == "__main__":

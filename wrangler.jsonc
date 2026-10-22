@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "care-risk-outreach-ai",
+  "main": "worker/src/index.js",
+  "compatibility_date": "2026-10-21",
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "care-risk-analytics"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

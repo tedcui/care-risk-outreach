@@ -1,0 +1,34 @@
+{
+  "name": "care-risk-outreach",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A predictive care outreach dashboard with Cloudflare Workers AI and guarded text-to-SQL.",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "wrangler:version": "wrangler --version",
+    "test": "node --test worker/test/*.test.mjs",
+    "ai:dev": "wrangler dev",
+    "ai:db:schema:local": "wrangler d1 execute DB --local --file=worker/schema.sql",
+    "ai:db:seed:local": "wrangler d1 execute DB --local --file=outputs/care_risk_ai/d1_seed.sql",
+    "ai:deploy": "wrangler deploy",
+    "ai:db:schema:remote": "wrangler d1 execute DB --remote --file=worker/schema.sql",
+    "ai:db:seed:remote": "wrangler d1 execute DB --remote --file=outputs/care_risk_ai/d1_seed.sql"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tedcui/care-risk-outreach.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/tedcui/care-risk-outreach/issues"
+  },
+  "homepage": "https://github.com/tedcui/care-risk-outreach#readme",
+  "devDependencies": {
+    "wrangler": "^4.151.3"
+  }
+}

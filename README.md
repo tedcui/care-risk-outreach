@@ -1,6 +1,6 @@
 # Care Risk Outreach
 
-An end-to-end risk-prioritization project that turns a predictive model into an offline, interactive outreach planning dashboard for care-team leaders.
+An end-to-end risk-prioritization project that turns a predictive model into an interactive outreach planning dashboard for care-team leaders. The core dashboard remains usable without the AI service; optional Cloudflare Workers AI features add grounded explanations and aggregate text-to-SQL questions.
 
 ## Live dashboard
 
@@ -19,6 +19,9 @@ https://tedcui.github.io/care-risk-outreach/
 - `stroke_prediction_analysis.ipynb` - source analysis notebook covering data quality, preprocessing, model comparison, interpretation, and outreach thresholds.
 - `build_care_risk_dashboard.py` - reproducible builder for the final dashboard and embedded data.
 - `care_risk_outreach_dashboard.html` - standalone interactive dashboard that works offline.
+- `worker/src/index.js` - Cloudflare Worker for live insights and guarded text-to-SQL.
+- `worker/schema.sql` - de-identified D1 analytical schema.
+- `wrangler.jsonc` - local and deployment configuration for Workers AI and D1.
 - `index.html` - GitHub Pages homepage.
 - `src_stroke_prediction.csv` - source dataset used by the notebook and dashboard builder.
 
@@ -34,17 +37,61 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Open `stroke_prediction_analysis.ipynb` in Jupyter or VS Code to run the technical analysis. Rebuild the dashboard with:
+Open `stroke_prediction_analysis.ipynb` in Jupyter or VS Code to run the technical analysis. Rebuild the local dashboard preview and D1 seed with:
 
 ```powershell
 python build_care_risk_dashboard.py
 ```
 
-The builder writes `care_risk_outreach_dashboard.html`, `index.html`, and `docs/index.html`. The dashboard has no external JavaScript or internet dependency.
+The default build writes `care_risk_outreach_dashboard.html` and generated files under `outputs/`. It does not change `index.html` or `docs/index.html`.
+
+## Run the AI service locally
+
+Install the JavaScript dependencies and authenticate Wrangler:
+
+```powershell
+npm.cmd install
+npx.cmd wrangler login
+```
+
+Complete the one-time **Workers & Pages** onboarding in the Cloudflare dashboard and choose a `workers.dev` subdomain. Wrangler requires that account subdomain before it can proxy Workers AI during local development.
+
+Initialize the local D1 database after building the dashboard:
+
+```powershell
+npm.cmd run ai:db:schema:local
+npm.cmd run ai:db:seed:local
+```
+
+Start the Worker and a local dashboard server in separate terminals:
+
+```powershell
+npm.cmd run ai:dev
+python -m http.server 8000 --bind 127.0.0.1
+```
+
+Open `http://127.0.0.1:8000/care_risk_outreach_dashboard.html`.
+
+The AI service uses Cloudflare's `AI` binding and does not place an API key in the browser. Population questions generate read-only aggregate SQL against D1. The Worker blocks write operations, unapproved tables, patient-level rows, oversized results, and groups smaller than 10 patients.
+
+## Publish after review
+
+Publishing is explicit. After the Worker URL is available and the local preview is approved, run:
+
+```powershell
+npm.cmd run ai:deploy
+npm.cmd run ai:db:schema:remote
+npm.cmd run ai:db:seed:remote
+python build_care_risk_dashboard.py --publish --ai-api-base https://care-risk-outreach-ai.<workers-subdomain>.workers.dev
+```
+
+Review the generated diff before committing or pushing.
 
 ## Notes
 
 - Patient identifiers are excluded from dashboard data.
+- Workers AI receives only the selected de-identified model or routing context.
+- LLM output explains existing model results; it does not calculate risk, diagnose patients, or make final staffing decisions.
 - Held-out predictions support model evaluation; the operational view scores the full cleaned population.
 - Subgroup results are an initial performance assessment, not a fairness conclusion.
 - Caregiver matching and program outcomes are clearly labeled MVP/demo concepts rather than validated production measures.
