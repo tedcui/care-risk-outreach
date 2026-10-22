@@ -146,6 +146,41 @@ function caregiverContext(raw = {}) {
   };
 }
 
+function outreachContext(raw = {}) {
+  const recommendation = raw.recommendation || {};
+  return {
+    population: textValue(raw.population, 50),
+    patient_count: finiteNumber(raw.patient_count),
+    current_outreach_percent: finiteNumber(raw.current_outreach_percent),
+    patients_contacted: finiteNumber(raw.patients_contacted),
+    observed_events_total: finiteNumber(raw.observed_events_total),
+    events_reached: finiteNumber(raw.events_reached),
+    precision: finiteNumber(raw.precision),
+    recall: finiteNumber(raw.recall),
+    lift: finiteNumber(raw.lift),
+    minimum_score: finiteNumber(raw.minimum_score),
+    manual_capacity: finiteNumber(raw.manual_capacity),
+    capacity_used: finiteNumber(raw.capacity_used),
+    objective: textValue(raw.objective, 40),
+    active_constraints: Array.isArray(raw.active_constraints)
+      ? raw.active_constraints.slice(0, 8).map((value) => textValue(value, 100))
+      : [],
+    recommendation: {
+      feasible: Boolean(recommendation.feasible),
+      outreach_percent: finiteNumber(recommendation.outreach_percent),
+      patients_contacted: finiteNumber(recommendation.patients_contacted),
+      events_reached: finiteNumber(recommendation.events_reached),
+      precision: finiteNumber(recommendation.precision),
+      recall: finiteNumber(recommendation.recall),
+      lift: finiteNumber(recommendation.lift),
+      minimum_score: finiteNumber(recommendation.minimum_score),
+      unmet_constraints: Array.isArray(recommendation.unmet_constraints)
+        ? recommendation.unmet_constraints.slice(0, 8).map((value) => textValue(value, 100))
+        : [],
+    },
+  };
+}
+
 async function runModel(env, messages, maxTokens = 700) {
   let lastError;
   for (const model of AI_MODELS) {
@@ -205,13 +240,16 @@ function normalizeInsight(value) {
 }
 
 async function generateInsight(env, kind, context) {
-  const isPatient = kind === "patient";
-  const system = isPatient
-    ? "You are an analytics assistant supporting a care outreach operations team. Explain only the supplied predictive-model facts. Do not diagnose, prescribe, recommend treatment, infer missing facts, or claim causality. The risk score prioritizes outreach and is not a clinical determination. Return JSON only with keys headline, summary, supporting_factors, and watch_outs. supporting_factors and watch_outs must be short arrays."
-    : "You are an analytics assistant explaining an illustrative caregiver-routing score. Use only the supplied patient and caregiver facts. Do not invent qualifications, clinical needs, availability, or outcomes. Make clear that the routing score supports human review and is not a staffing rule. Return JSON only with keys headline, summary, supporting_factors, and watch_outs. supporting_factors and watch_outs must be short arrays.";
+  const prompts = {
+    patient: "You are an analytics assistant supporting a care outreach operations team. Explain only the supplied predictive-model facts. Do not diagnose, prescribe, recommend treatment, infer missing facts, or claim causality. The risk score prioritizes outreach and is not a clinical determination. Return JSON only with keys headline, summary, supporting_factors, and watch_outs. supporting_factors and watch_outs must be short arrays.",
+    caregiver: "You are an analytics assistant explaining an illustrative caregiver-routing score. Use only the supplied patient and caregiver facts. Do not invent qualifications, clinical needs, availability, or outcomes. Make clear that the routing score supports human review and is not a staffing rule. Return JSON only with keys headline, summary, supporting_factors, and watch_outs. supporting_factors and watch_outs must be short arrays.",
+    outreach: "You are an operations analytics assistant explaining a capacity-based outreach plan. Use only the supplied current metrics, deterministic optimizer recommendation, objective, and constraints. Clearly distinguish the current plan from the recommended plan. Never calculate a new threshold, alter model scores, claim a universally best threshold, diagnose, prescribe, or infer missing facts. If constraints are infeasible, identify the supplied unmet constraints. Return JSON only with keys headline, summary, supporting_factors, and watch_outs. supporting_factors and watch_outs must be short arrays.",
+  };
+  const labels = { patient: "patient outreach ranking", caregiver: "caregiver match", outreach: "outreach operating plan" };
+  const system = prompts[kind];
   const result = await runModel(env, [
     { role: "system", content: system },
-    { role: "user", content: `Explain this ${isPatient ? "patient outreach ranking" : "caregiver match"}:\n${JSON.stringify(context)}` },
+    { role: "user", content: `Explain this ${labels[kind]}:\n${JSON.stringify(context)}` },
   ]);
   return { ...normalizeInsight(extractJsonObject(result.text)), model: result.model };
 }
@@ -326,10 +364,18 @@ async function summarizeRows(env, question, sql, rows) {
 }
 
 async function answerContextQuestion(env, question, scope, context) {
+  const contextLabel = scope === "caregiver"
+    ? "caregiver-match"
+    : scope === "outreach"
+      ? "outreach-plan and deterministic optimizer"
+      : "patient-ranking";
+  const outreachRule = scope === "outreach"
+    ? " Do not calculate a new threshold or claim a universally best threshold; explain only the supplied current and recommended operating points under the stated objective and constraints."
+    : "";
   const result = await runModel(env, [
     {
       role: "system",
-      content: `Answer only from the supplied ${scope === "caregiver" ? "caregiver-match" : "patient-ranking"} context. If the context does not answer the question, say so. Do not diagnose, prescribe, infer missing facts, or claim causality. Return JSON only with keys answer, key_points, and caveat.`,
+      content: `Answer only from the supplied ${contextLabel} context. If the context does not answer the question, say so. Do not diagnose, prescribe, infer missing facts, or claim causality.${outreachRule} Return JSON only with keys answer, key_points, and caveat.`,
     },
     { role: "user", content: JSON.stringify({ question, context }) },
   ], 650);
@@ -338,9 +384,13 @@ async function answerContextQuestion(env, question, scope, context) {
 
 async function handleInsight(request, env) {
   const body = await readJson(request);
-  const kind = body.kind === "caregiver" ? "caregiver" : body.kind === "patient" ? "patient" : null;
-  if (!kind) throw new HttpError(400, "Insight kind must be patient or caregiver.");
-  const context = kind === "patient" ? patientContext(body.context) : caregiverContext(body.context);
+  const kind = ["patient", "caregiver", "outreach"].includes(body.kind) ? body.kind : null;
+  if (!kind) throw new HttpError(400, "Insight kind must be patient, caregiver, or outreach.");
+  const context = kind === "patient"
+    ? patientContext(body.context)
+    : kind === "caregiver"
+      ? caregiverContext(body.context)
+      : outreachContext(body.context);
   const insight = await generateInsight(env, kind, context);
   return jsonResponse(request, { ...insight, grounded: true });
 }
@@ -349,9 +399,13 @@ async function handleAsk(request, env) {
   const body = await readJson(request);
   const question = textValue(body.question, MAX_QUESTION_CHARS);
   if (!question || question.length < 3) throw new HttpError(400, "Enter a question before asking the AI assistant.");
-  const scope = ["patient", "caregiver", "population"].includes(body.scope) ? body.scope : "population";
+  const scope = ["patient", "caregiver", "outreach", "population"].includes(body.scope) ? body.scope : "population";
   if (scope !== "population") {
-    const context = scope === "patient" ? patientContext(body.context) : caregiverContext(body.context);
+    const context = scope === "patient"
+      ? patientContext(body.context)
+      : scope === "caregiver"
+        ? caregiverContext(body.context)
+        : outreachContext(body.context);
     const answer = await answerContextQuestion(env, question, scope, context);
     return jsonResponse(request, { ...answer, mode: "grounded-context" });
   }

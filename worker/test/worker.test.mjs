@@ -100,6 +100,91 @@ test("patient insight endpoint returns grounded structured content", async () =>
   assert.equal(response.headers.get("Access-Control-Allow-Origin"), "http://127.0.0.1:8000");
 });
 
+test("outreach insight endpoint explains a deterministic recommendation", async () => {
+  let modelPrompt = "";
+  const env = {
+    AI: {
+      run: async (_model, options) => {
+        modelPrompt = options.messages.map((message) => message.content).join("\n");
+        return {
+          response: JSON.stringify({
+            headline: "Feasible outreach plan",
+            summary: "The recommended operating point satisfies the supplied capacity and recall constraints.",
+            supporting_factors: ["Capacity requirement met", "Recall target met"],
+            watch_outs: ["Validate operational assumptions"],
+          }),
+        };
+      },
+    },
+  };
+  const response = await worker.fetch(
+    postRequest("/api/insight", {
+      kind: "outreach",
+      context: {
+        population: "All patients",
+        patients_contacted: 511,
+        objective: "max_events",
+        active_constraints: ["No more than 550 contacts", "Recall at least 40%"],
+        recommendation: {
+          feasible: true,
+          outreach_percent: 10,
+          patients_contacted: 511,
+          events_reached: 105,
+          recall: 0.422,
+          precision: 0.205,
+          lift: 4.2,
+        },
+      },
+    }),
+    env
+  );
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(payload.grounded, true);
+  assert.equal(payload.headline, "Feasible outreach plan");
+  assert.match(modelPrompt, /deterministic optimizer recommendation/i);
+  assert.match(modelPrompt, /outreach operating plan/i);
+});
+
+test("outreach questions use grounded context without querying D1", async () => {
+  let modelCalls = 0;
+  const env = {
+    AI: {
+      run: async () => {
+        modelCalls += 1;
+        return {
+          response: JSON.stringify({
+            answer: "The supplied feasible plan contacts 511 patients at the 10 percent operating point.",
+            key_points: ["The recommendation is conditional on the selected constraints."],
+            caveat: "This is an operational planning recommendation, not a clinical conclusion.",
+          }),
+        };
+      },
+    },
+    DB: {
+      prepare() {
+        throw new Error("D1 should not be queried for outreach-context questions.");
+      },
+    },
+  };
+  const response = await worker.fetch(
+    postRequest("/api/ask", {
+      scope: "outreach",
+      question: "What is the best threshold under these constraints?",
+      context: {
+        population: "All patients",
+        objective: "max_events",
+        recommendation: { feasible: true, outreach_percent: 10, patients_contacted: 511 },
+      },
+    }),
+    env
+  );
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(payload.mode, "grounded-context");
+  assert.equal(modelCalls, 1);
+});
+
 test("population question generates SQL, queries D1, and summarizes results", async () => {
   const modelResponses = [
     {
